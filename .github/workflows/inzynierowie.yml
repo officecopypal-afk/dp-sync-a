@@ -11,8 +11,9 @@ on:
         options:
           - shadow
           - production
-  schedule:
-    - cron: '0 6,15 * * *'  # 2×/dobę, UTC 06:00 i 15:00 (= PL 08:00/17:00 lato, 07:00/16:00 zima)
+  # Schedule usunięty — trigger robi Supabase pg_cron 2×/dobę przez workflow_dispatch
+  # (GH Actions `schedule` auto-wyłącza się po 60 dniach bez commita — patrz jobid dispatchera;
+  #  pg_cron + pg_net jest niezawodne, jak przy scraperze świadectw)
 
 concurrency:
   group: scraper-inzynierowie
