@@ -12,6 +12,10 @@ const RETRY_DELAY_MS = 5000;
 const PAGE_DELAY_MS = 1000;
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const TABLE = tableName('inzynierowie');
+// Ile czasu wpis może nie pokazywać się w portalu MRiT, zanim uznamy go za wykreślony.
+const KARENCJA_USUNIECIA = '3 days';
+// Więcej usunięć w jednym przebiegu = raczej awaria portalu niż prawdziwe wykreślenia.
+const MAX_USUNIEC_NA_PRZEBIEG = 50;
 
 type StopReason = 'koniec_bazy' | 'awaria_serwera' | 'brak_rekordow';
 
@@ -65,11 +69,43 @@ async function main() {
     }
 
     if (stopReason === 'koniec_bazy') {
-      const deleteResult = await db.query(
-        `DELETE FROM ${TABLE} WHERE ostatnio_widziany < (NOW() - INTERVAL '2 hours')`,
+      // Kogo nie było w tym przebiegu. Tylko log, bez kasowania: portal MRiT potrafi
+      // na chwilę nie pokazać pojedynczego wpisu (19.11 zniknął 41084, choć wpis jest ważny).
+      const brakujacy = await db.query<{ inzynier_id: string }>(
+        `SELECT inzynier_id FROM ${TABLE}
+         WHERE ostatnio_widziany < (NOW() - INTERVAL '2 hours')
+         ORDER BY inzynier_id LIMIT 50`,
       );
-      console.log(`🗑️ Wykreślono z bazy: ${deleteResult.rowCount}`);
-      console.log(`✨ KONIEC — upserted ${totalUpserted}, deleted ${deleteResult.rowCount}`);
+      if (brakujacy.rowCount) {
+        console.log(
+          `👀 Nie widać w tym przebiegu (pierwsze 50): ${brakujacy.rows.map((r) => r.inzynier_id).join(', ')}`,
+        );
+      }
+
+      // Usuwamy dopiero po karencji i tylko gdy MRiT nie przyjął od tej osoby
+      // świadectwa wystawionego po dniu, w którym ostatnio była w wykazie.
+      const WARUNEK_USUNIECIA = `
+        i.ostatnio_widziany < (NOW() - INTERVAL '${KARENCJA_USUNIECIA}')
+        AND NOT EXISTS (
+          SELECT 1 FROM public.swiadectwa_energetyczne s
+          WHERE s.inzynier_id = i.inzynier_id
+            AND s.data_wystawienia > (i.ostatnio_widziany AT TIME ZONE 'Europe/Warsaw')::date
+        )`;
+      const kandydaci = await db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ${TABLE} i WHERE ${WARUNEK_USUNIECIA}`,
+      );
+      const doUsuniecia = kandydaci.rows[0]?.n ?? 0;
+
+      if (doUsuniecia > MAX_USUNIEC_NA_PRZEBIEG) {
+        console.log(
+          `⛔ ${doUsuniecia} osób do wykreślenia naraz (limit ${MAX_USUNIEC_NA_PRZEBIEG}). Nic nie kasuję, sprawdź portal MRiT.`,
+        );
+        process.exitCode = 1;
+      } else {
+        const deleteResult = await db.query(`DELETE FROM ${TABLE} i WHERE ${WARUNEK_USUNIECIA}`);
+        console.log(`🗑️ Wykreślono z bazy: ${deleteResult.rowCount} (karencja ${KARENCJA_USUNIECIA})`);
+        console.log(`✨ KONIEC — upserted ${totalUpserted}, deleted ${deleteResult.rowCount}`);
+      }
     } else {
       console.log(`⚠️ Zakończono bez DELETE (stopReason=${stopReason}, upserted=${totalUpserted})`);
       process.exitCode = 1;
